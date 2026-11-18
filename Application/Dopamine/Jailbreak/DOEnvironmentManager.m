@@ -13,6 +13,7 @@
 #import <sys/utsname.h>
 #import <sys/stat.h>
 #import <unistd.h>
+#import <string.h>
 #import <mach-o/dyld.h>
 #import <libgrabkernel2/libgrabkernel2.h>
 #import <libjailbreak/info.h>
@@ -681,6 +682,155 @@ extern char **environ;
     }
 }
 
+- (NSString *)customKernelcachePath
+{
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/kernelcache"];
+}
+
+- (BOOL)hasCustomKernelcache
+{
+    NSDictionary<NSFileAttributeKey, id> *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[self customKernelcachePath] error:nil];
+    return [attributes[NSFileType] isEqualToString:NSFileTypeRegular] && [attributes[NSFileSize] unsignedLongLongValue] > 0;
+}
+
+- (unsigned long long)customKernelcacheSize
+{
+    NSDictionary<NSFileAttributeKey, id> *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[self customKernelcachePath] error:nil];
+    return [attributes[NSFileSize] unsignedLongLongValue];
+}
+
+- (BOOL)validateKernelcacheAtPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error
+{
+    NSDictionary<NSFileAttributeKey, id> *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:error];
+    if (!attributes) return NO;
+
+    if (![attributes[NSFileType] isEqualToString:NSFileTypeRegular]) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"DopamineKernelcache"
+                                         code:1
+                                     userInfo:@{NSLocalizedDescriptionKey: @"The selected item is not a regular file."}];
+        }
+        return NO;
+    }
+
+    unsigned long long fileSize = [attributes[NSFileSize] unsignedLongLongValue];
+    const unsigned long long minimumSize = 8ULL * 1024ULL * 1024ULL;
+    const unsigned long long maximumSize = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+    if (fileSize < minimumSize || fileSize > maximumSize) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"DopamineKernelcache"
+                                         code:2
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                                    [NSString stringWithFormat:@"The selected file is %.1f MB. A kernelcache should be between 8 MB and 2 GB.",
+                                                                                (double)fileSize / (1024.0 * 1024.0)]}];
+        }
+        return NO;
+    }
+
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:path];
+    NSData *header = [handle readDataOfLength:16];
+    [handle closeFile];
+    if (header.length < 4) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"DopamineKernelcache"
+                                         code:3
+                                     userInfo:@{NSLocalizedDescriptionKey: @"The selected file could not be read."}];
+        }
+        return NO;
+    }
+
+    const uint8_t *bytes = header.bytes;
+    BOOL isZIP = bytes[0] == 'P' && bytes[1] == 'K';
+    BOOL isGZIP = bytes[0] == 0x1f && bytes[1] == 0x8b;
+    BOOL isBZip2 = bytes[0] == 'B' && bytes[1] == 'Z' && bytes[2] == 'h';
+    BOOL isXZ = bytes[0] == 0xfd && bytes[1] == '7' && bytes[2] == 'z' && bytes[3] == 'X';
+    BOOL isPlist = (header.length >= 6 && memcmp(bytes, "bplist", 6) == 0) || bytes[0] == '<';
+    if (isZIP || isGZIP || isBZip2 || isXZ || isPlist) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"DopamineKernelcache"
+                                         code:4
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                                    @"The selected file is an archive or metadata file, not an extracted kernelcache."}];
+        }
+        return NO;
+    }
+
+    return YES;
+}
+
+- (BOOL)importCustomKernelcacheFromURL:(NSURL *)sourceURL error:(NSError * _Nullable * _Nullable)error
+{
+    if (!sourceURL.isFileURL) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"DopamineKernelcache"
+                                         code:5
+                                     userInfo:@{NSLocalizedDescriptionKey: @"The selected item is not a local file."}];
+        }
+        return NO;
+    }
+
+    BOOL accessedSecurityScopedResource = [sourceURL startAccessingSecurityScopedResource];
+    NSString *temporaryPath = [[self customKernelcachePath] stringByAppendingFormat:@".importing-%@", NSUUID.UUID.UUIDString];
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    BOOL success = NO;
+
+    @try {
+        if (![self validateKernelcacheAtPath:sourceURL.path error:error]) return NO;
+
+        NSString *documentsPath = [[self customKernelcachePath] stringByDeletingLastPathComponent];
+        if (![fileManager createDirectoryAtPath:documentsPath withIntermediateDirectories:YES attributes:nil error:error]) return NO;
+
+        [fileManager removeItemAtPath:temporaryPath error:nil];
+        if (![fileManager copyItemAtPath:sourceURL.path toPath:temporaryPath error:error]) return NO;
+        if (![self validateKernelcacheAtPath:temporaryPath error:error]) return NO;
+
+        unsigned long long sourceSize = [[[fileManager attributesOfItemAtPath:sourceURL.path error:nil] objectForKey:NSFileSize] unsignedLongLongValue];
+        unsigned long long copiedSize = [[[fileManager attributesOfItemAtPath:temporaryPath error:nil] objectForKey:NSFileSize] unsignedLongLongValue];
+        if (sourceSize == 0 || sourceSize != copiedSize) {
+            if (error) {
+                *error = [NSError errorWithDomain:@"DopamineKernelcache"
+                                             code:6
+                                         userInfo:@{NSLocalizedDescriptionKey: @"The kernelcache copy was incomplete."}];
+            }
+            return NO;
+        }
+
+        NSURL *destinationURL = [NSURL fileURLWithPath:[self customKernelcachePath]];
+        NSURL *temporaryURL = [NSURL fileURLWithPath:temporaryPath];
+        if ([fileManager fileExistsAtPath:destinationURL.path]) {
+            if (![fileManager replaceItemAtURL:destinationURL
+                                  withItemAtURL:temporaryURL
+                                 backupItemName:nil
+                                        options:0
+                               resultingItemURL:nil
+                                          error:error]) {
+                return NO;
+            }
+        }
+        else if (![fileManager moveItemAtURL:temporaryURL toURL:destinationURL error:error]) {
+            return NO;
+        }
+
+        [fileManager setAttributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
+                     ofItemAtPath:destinationURL.path
+                            error:nil];
+        success = YES;
+    }
+    @finally {
+        if (!success) [fileManager removeItemAtPath:temporaryPath error:nil];
+        if (accessedSecurityScopedResource) [sourceURL stopAccessingSecurityScopedResource];
+    }
+
+    return success;
+}
+
+- (BOOL)removeCustomKernelcacheWithError:(NSError * _Nullable * _Nullable)error
+{
+    NSString *path = [self customKernelcachePath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return YES;
+    return [[NSFileManager defaultManager] removeItemAtPath:path error:error];
+}
+
 - (NSString *)accessibleKernelPath
 {
     if ([self isInstalledThroughTrollStore] || getuid() == 0) {
@@ -695,12 +845,20 @@ extern char **environ;
         if ([[NSFileManager defaultManager] fileExistsAtPath:kernelInApp]) {
             return kernelInApp;
         }
-        
-        [[DOUIManager sharedInstance] sendLog:@"Downloading Kernel" debug:NO];
-        NSString *kernelcachePath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/kernelcache"];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:kernelcachePath]) {
-            if (grab_images([NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]) == false) return nil;
+
+        NSString *kernelcachePath = [self customKernelcachePath];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:kernelcachePath]) {
+            NSError *validationError = nil;
+            if ([self validateKernelcacheAtPath:kernelcachePath error:&validationError]) {
+                [[DOUIManager sharedInstance] sendLog:@"Using Imported Kernelcache" debug:NO];
+                return kernelcachePath;
+            }
+            [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"Imported kernelcache is invalid: %@", validationError.localizedDescription] debug:NO];
+            return nil;
         }
+
+        [[DOUIManager sharedInstance] sendLog:@"Downloading Kernel" debug:NO];
+        if (grab_images([NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]) == false) return nil;
         return kernelcachePath;
     }
 }
@@ -904,3 +1062,4 @@ extern char **environ;
 }
 
 @end
+
