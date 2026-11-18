@@ -16,8 +16,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface DOMainViewController : UIViewController <DOActionMenuDelegate>
+@interface DOMainViewController : UIViewController <DOActionMenuDelegate, UIDocumentPickerDelegate>
 
 @end
 
 NS_ASSUME_NONNULL_END
+
