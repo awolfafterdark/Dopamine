@@ -38,6 +38,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)isArm64e;
 - (BOOL)isSPTM;
 - (NSString *)versionSupportString;
+- (NSString *)customKernelcachePath;
+- (BOOL)hasCustomKernelcache;
+- (unsigned long long)customKernelcacheSize;
+- (BOOL)importCustomKernelcacheFromURL:(NSURL *)sourceURL error:(NSError * _Nullable * _Nullable)error;
+- (BOOL)removeCustomKernelcacheWithError:(NSError * _Nullable * _Nullable)error;
 - (NSString *)accessibleKernelPath;
 - (NSString *)accessibleSPTMPath;
 - (NSString *)accessibleTXMPath;
@@ -81,3 +86,4 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 NS_ASSUME_NONNULL_END
+
