@@ -22,6 +22,7 @@
 @property DOJailbreakButton *jailbreakBtn;
 @property NSArray<NSLayoutConstraint *> *jailbreakButtonConstraints;
 @property DOActionMenuButton *updateButton;
+@property DOActionMenuButton *kernelcacheButton;
 @property(nonatomic) BOOL hideStatusBar;
 @property(nonatomic) BOOL hideHomeIndicator;
 
@@ -112,8 +113,22 @@
         [actionView.leadingAnchor constraintEqualToAnchor:stackView.leadingAnchor],
         [actionView.trailingAnchor constraintEqualToAnchor:stackView.trailingAnchor],
     ]];
-    
-    
+
+    // Custom kernelcache picker. The imported file is copied into the app's
+    // Documents directory so it remains readable after the document picker closes.
+    self.kernelcacheButton = [DOActionMenuButton buttonWithAction:[UIAction actionWithTitle:@"Import Custom Kernelcache" image:[UIImage systemImageNamed:@"doc.badge.plus" withConfiguration:[DOGlobalAppearance smallIconImageConfiguration]] identifier:@"kernelcache" handler:^(__kindof UIAction * _Nonnull action) {
+        [actionView hide];
+        [self showKernelcacheActions];
+    }] chevron:YES];
+    self.kernelcacheButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [stackView addArrangedSubview:self.kernelcacheButton];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.kernelcacheButton.leadingAnchor constraintEqualToAnchor:stackView.leadingAnchor],
+        [self.kernelcacheButton.trailingAnchor constraintEqualToAnchor:stackView.trailingAnchor],
+        [self.kernelcacheButton.heightAnchor constraintEqualToConstant:54],
+    ]];
+    [self updateKernelcacheButton];
+
     UIView *buttonPlaceHolder = [[UIView alloc] init];
     [buttonPlaceHolder setTranslatesAutoresizingMaskIntoConstraints:NO];
     [stackView addArrangedSubview:buttonPlaceHolder];
@@ -194,6 +209,117 @@
 {
     [super viewWillAppear:animated];
     [self.jailbreakBtn.button setTitle:[self jailbreakButtonTitle] forState:UIControlStateNormal];
+    [self updateKernelcacheButton];
+}
+
+#pragma mark - Custom Kernelcache
+
+- (void)updateKernelcacheButton
+{
+    if (!self.kernelcacheButton) return;
+
+    DOEnvironmentManager *environmentManager = [DOEnvironmentManager sharedManager];
+    BOOL hasKernelcache = [environmentManager hasCustomKernelcache];
+    UIButtonConfiguration *configuration = self.kernelcacheButton.configuration;
+    configuration.title = hasKernelcache ? @"Custom Kernelcache" : @"Import Custom Kernelcache";
+    configuration.subtitle = hasKernelcache
+        ? [NSString stringWithFormat:@"Ready • %.1f MB", (double)[environmentManager customKernelcacheSize] / (1024.0 * 1024.0)]
+        : @"Select the file that exactly matches this device and iOS build";
+    configuration.image = [UIImage systemImageNamed:(hasKernelcache ? @"checkmark.circle.fill" : @"doc.badge.plus")
+                                  withConfiguration:[DOGlobalAppearance smallIconImageConfiguration]];
+    configuration.titleAlignment = UIButtonConfigurationTitleAlignmentLeading;
+    configuration.subtitleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey,id> * _Nonnull(NSDictionary<NSAttributedStringKey,id> * _Nonnull textAttributes) {
+        NSMutableDictionary<NSAttributedStringKey,id> *attributes = textAttributes.mutableCopy;
+        attributes[NSForegroundColorAttributeName] = [UIColor colorWithWhite:1 alpha:0.60];
+        attributes[NSFontAttributeName] = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+        return attributes;
+    };
+    self.kernelcacheButton.configuration = configuration;
+    self.kernelcacheButton.accessibilityLabel = @"Custom kernelcache";
+    self.kernelcacheButton.accessibilityValue = hasKernelcache ? configuration.subtitle : @"No file selected";
+    self.kernelcacheButton.accessibilityHint = hasKernelcache ? @"Double tap to replace or remove the imported file." : @"Double tap to select a matching kernelcache file.";
+}
+
+- (void)showKernelcacheActions
+{
+    if (![[DOEnvironmentManager sharedManager] hasCustomKernelcache]) {
+        [self presentKernelcachePicker];
+        return;
+    }
+
+    UIAlertController *actions = [UIAlertController alertControllerWithTitle:@"Custom Kernelcache"
+                                                                      message:@"Dopamine will use this imported file instead of downloading one. The file must exactly match this device and iOS build."
+                                                               preferredStyle:UIAlertControllerStyleActionSheet];
+    [actions addAction:[UIAlertAction actionWithTitle:@"Replace File" style:UIAlertActionStyleDefault handler:^(__kindof UIAlertAction * _Nonnull action) {
+        [self presentKernelcachePicker];
+    }]];
+    [actions addAction:[UIAlertAction actionWithTitle:@"Remove File" style:UIAlertActionStyleDestructive handler:^(__kindof UIAlertAction * _Nonnull action) {
+        NSError *error = nil;
+        if (![[DOEnvironmentManager sharedManager] removeCustomKernelcacheWithError:&error]) {
+            [self presentKernelcacheError:error];
+        }
+        [self updateKernelcacheButton];
+    }]];
+    [actions addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = actions.popoverPresentationController;
+    if (popover) {
+        popover.sourceView = self.kernelcacheButton;
+        popover.sourceRect = self.kernelcacheButton.bounds;
+    }
+    [self presentViewController:actions animated:YES completion:nil];
+}
+
+- (void)presentKernelcachePicker
+{
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.data"]
+                                                                                                     inMode:UIDocumentPickerModeImport];
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    picker.modalPresentationStyle = UIModalPresentationFormSheet;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
+{
+    NSURL *sourceURL = urls.firstObject;
+    if (!sourceURL) return;
+
+    self.kernelcacheButton.enabled = NO;
+    UIButtonConfiguration *configuration = self.kernelcacheButton.configuration;
+    configuration.title = @"Importing Kernelcache…";
+    configuration.subtitle = sourceURL.lastPathComponent;
+    self.kernelcacheButton.configuration = configuration;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        BOOL imported = [[DOEnvironmentManager sharedManager] importCustomKernelcacheFromURL:sourceURL error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.kernelcacheButton.enabled = YES;
+            [self updateKernelcacheButton];
+            if (imported) {
+                double sizeInMB = (double)[[DOEnvironmentManager sharedManager] customKernelcacheSize] / (1024.0 * 1024.0);
+                UIAlertController *confirmation = [UIAlertController alertControllerWithTitle:@"Kernelcache Ready"
+                                                                                       message:[NSString stringWithFormat:@"Imported %.1f MB. Dopamine will use this file the next time you tap Jailbreak.", sizeInMB]
+                                                                                preferredStyle:UIAlertControllerStyleAlert];
+                [confirmation addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:confirmation animated:YES completion:nil];
+            }
+            else {
+                [self presentKernelcacheError:error];
+            }
+        });
+    });
+}
+
+- (void)presentKernelcacheError:(NSError *)error
+{
+    NSString *message = error.localizedDescription ?: @"The selected kernelcache could not be imported.";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Kernelcache Import Failed"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)startJailbreak
@@ -421,3 +547,4 @@
 }
 
 @end
+
